@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.env
+venv/
+.venv/
+*.lock
+last_update.txt
+gif_file_id.txt
+poll.lock
+state/
