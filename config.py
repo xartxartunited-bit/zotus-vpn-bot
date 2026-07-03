@@ -1,12 +1,12 @@
 """Zotus++ Telegram Bot — Configuration"""
 
 # Bot
-BOT_TOKEN = "8790938688:AAGNz9Vz6IOGt-1HnBE9c9_G7GDKJ1TPk4s"
+BOT_TOKEN = "8790938688:AAHtNliw_QQ_xEayR_xguegCwm3d1fW9C7s"
 ADMIN_IDS = [6971992145]
 
 # Webhook
 WEBHOOK_HOST = "zotus.bothost.tech"
-WEBHOOK_PORT = 8443
+WEBHOOK_PORT = 3000
 WEBHOOK_PATH = "/webhook"
 
 # DB — Zotus++ (vpn.zotus.ru/plus)
