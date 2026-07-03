@@ -1,6 +1,6 @@
 """Zotus++ Telegram Bot — Main entry point.
 
-Webhook mode for ctrlfree.host.
+Webhook mode for bothost.tech.
 Background tasks via JobQueue.
 """
 import asyncio
@@ -11,14 +11,12 @@ from telegram import Update
 from telegram.ext import (
     Application, ApplicationBuilder,
     CommandHandler, CallbackQueryHandler, MessageHandler, filters,
-    PicklePersistence,
 )
 
 from config import (
     BOT_TOKEN, WEBHOOK_HOST, WEBHOOK_PORT, WEBHOOK_PATH,
     ADMIN_IDS, NOTIFY_CHECK_INTERVAL, PAYMENT_POLL_INTERVAL,
 )
-from db import init_pools, close_pools
 from handlers.start import start
 from handlers.callbacks import callback_router
 from handlers.commands import status_cmd, devices_cmd, buy_cmd, link_cmd, cancel_cmd
@@ -40,31 +38,22 @@ async def combined_callback(update: Update, context) -> None:
     if not q:
         return
 
-    # Skip callbacks handled by ConversationHandler
     if q.data in ("chpass_start", "cancel_state"):
         return
 
-    # Try admin router first
     handled = await admin_router(update, context)
     if handled:
         return
 
-    # Fall through to user callbacks
     await callback_router(update, context)
 
 
 async def broadcast_handler(update: Update, context) -> None:
-    """Handle broadcast messages from admin."""
     await handle_broadcast_message(update, context)
 
 
 async def post_init(app: Application) -> None:
-    """Called after application is initialized."""
-    logger.info("Initializing database pools...")
-    await init_pools()
-    logger.info("Database pools ready.")
-
-    # Schedule background tasks
+    logger.info("Bot initialized. Scheduling background tasks...")
     job_queue = app.job_queue
     if job_queue:
         job_queue.run_repeating(
@@ -84,27 +73,18 @@ async def post_init(app: Application) -> None:
         logger.info("Background tasks scheduled.")
 
 
-async def post_shutdown(app: Application) -> None:
-    """Called on shutdown."""
-    logger.info("Closing database pools...")
-    await close_pools()
-    logger.info("Shutdown complete.")
-
-
 def main() -> None:
-    # Build application with job queue for background tasks
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
         .post_init(post_init)
-        .post_shutdown(post_shutdown)
         .build()
     )
 
-    # ── Conversation handlers ──
+    # Conversation handlers
     app.add_handler(password_conv_handler())
 
-    # ── Command handlers ──
+    # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("devices", devices_cmd))
@@ -112,17 +92,16 @@ def main() -> None:
     app.add_handler(CommandHandler("link", link_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
 
-    # ── Callback handler (all inline buttons) ──
+    # Callbacks
     app.add_handler(CallbackQueryHandler(combined_callback))
 
-    # ── Broadcast message handler (admin text for mass send) ──
+    # Broadcast (admin only)
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.User(user_id=ADMIN_IDS),
         broadcast_handler,
     ))
 
-    # ── Start ──
-    logger.info(f"Starting bot in webhook mode on {WEBHOOK_HOST}:{WEBHOOK_PORT}{WEBHOOK_PATH}")
+    logger.info(f"Starting webhook on {WEBHOOK_HOST}:{WEBHOOK_PORT}{WEBHOOK_PATH}")
     app.run_webhook(
         listen="0.0.0.0",
         port=WEBHOOK_PORT,

@@ -3,7 +3,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from db import zotuspp, fetch_all, fetch_val, execute
+import db
 
 logger = logging.getLogger(__name__)
 
@@ -12,17 +12,12 @@ async def notify_expiring_subscriptions(bot) -> None:
     """Send notifications for subscriptions expiring in configured days."""
     from config import NOTIFY_DAYS
 
-    pp = zotuspp()
     today = datetime.now().date()
 
     for days in NOTIFY_DAYS:
         target_date = today + timedelta(days=days)
 
-        users = await fetch_all(pp,
-            "SELECT id, username, chat_id, subscription_expires FROM users "
-            "WHERE is_plus = 1 AND chat_id IS NOT NULL AND chat_id > 0 "
-            "AND subscription_expires IS NOT NULL "
-            "AND subscription_expires != '0000-00-00 00:00:00'")
+        users = await db.get_expiring_users(days)
 
         for u in users:
             try:
@@ -41,13 +36,13 @@ async def notify_expiring_subscriptions(bot) -> None:
                 continue
 
             if days == 0:
-                msg = (f"⚠️ <b>Подписка Zotus++ истекает сегодня!</b>\n\n"
-                       f"Продлите сейчас чтобы не потерять доступ.\n"
-                       f"/buy — купить Zotus++")
+                msg = ("⚠️ <b>Подписка Zotus++ истекает сегодня!</b>\n\n"
+                       "Продлите сейчас чтобы не потерять доступ.\n"
+                       "/buy — купить Zotus++")
             else:
                 msg = (f"📅 <b>Подписка Zotus++ истекает через {days} дн.</b>\n\n"
-                       f"Не забудьте продлить.\n"
-                       f"/buy — продлить Zotus++")
+                       "Не забудьте продлить.\n"
+                       "/buy — продлить Zotus++")
 
             try:
                 await bot.send_message(chat_id=int(chat_id), text=msg, parse_mode="HTML")
@@ -60,14 +55,9 @@ async def notify_expiring_subscriptions(bot) -> None:
 
 async def poll_pending_payments(bot) -> None:
     """Check pending payments and notify users when completed."""
-    from db import store
     from yookassa import _call
 
-    st = store()
-    pending = await fetch_all(st,
-        "SELECT id, user_id, amount, zotus_username, yookassa_id FROM purchases "
-        "WHERE status = 'pending' AND yookassa_id IS NOT NULL "
-        "ORDER BY created_at DESC LIMIT 50")
+    pending = await db.get_pending_payments()
 
     for p in pending:
         try:
@@ -77,11 +67,7 @@ async def poll_pending_payments(bot) -> None:
 
             status = result.get("status")
             if status == "completed":
-                # Notify user via Telegram
-                pp = zotuspp()
-                user = await fetch_one(pp,
-                    "SELECT chat_id, username FROM users WHERE username = %s",
-                    (p.get("zotus_username"),))
+                user = await db.find_user_by_username(p.get("zotus_username", ""))
                 if user and user.get("chat_id"):
                     try:
                         await bot.send_message(

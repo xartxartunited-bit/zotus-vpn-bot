@@ -3,41 +3,29 @@ import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from db import zotuspp, store, fetch_one, execute, fetch_all, fetch_val
+import db
 from keyboards import (
     main_kb, back_kb, devices_kb, buy_tiers_kb, payment_kb, wl_buy_kb,
-    cancel_kb,
 )
 from utils import profile_text, device_text, notification_text
 from config import (
     ADMIN_IDS, MAX_WL_DEVICES, PLUS_PRICES, WL_EXTRA_FIRST, WL_EXTRA_NEXT,
-    ZOTUSPP_STORE_APP_SLUG,
 )
-from yookassa import create_payment, check_payment, get_wl_usernames
+from yookassa import create_payment, check_payment
+from handlers.activity import track_activity
 
 
 async def _get_user(tg_id: int) -> dict | None:
-    return await fetch_one(zotuspp(), "SELECT * FROM users WHERE telegram_id = %s", (tg_id,))
-
-
-async def _get_store_user_id(username: str) -> int | None:
-    return await fetch_val(store(), "SELECT id FROM users WHERE username = %s", (username,))
+    return await db.find_user(tg_id)
 
 
 async def _profile_text(user: dict) -> str:
-    pp = zotuspp()
     uid = user["id"]
-    plus_count = await fetch_val(pp,
-        "SELECT COUNT(*) FROM sub_devices WHERE user_id = %s AND is_deleted = 0 AND sub_type = 'plus'",
-        (uid,)) or 0
-    wl_count = await fetch_val(pp,
-        "SELECT COUNT(*) FROM sub_devices WHERE user_id = %s AND is_deleted = 0 AND sub_type = 'wl'",
-        (uid,)) or 0
-    wl_limit = int(user.get("wl_device_limit", 2) or 2)
-    streak = await fetch_one(pp,
-        "SELECT current_streak, max_streak FROM user_streaks WHERE user_id = %s",
-        (uid,)) or {"current_streak": 0, "max_streak": 0}
-    bal = await fetch_val(store(), "SELECT balance FROM users WHERE username = %s", (user["username"],))
+    plus_count = await db.get_device_count(uid, "plus")
+    wl_count = await db.get_device_count(uid, "wl")
+    wl_limit = await db.get_wl_limit(user["username"])
+    streak = await db.get_streak(uid)
+    bal = await db.get_balance(user["username"])
     return profile_text(user, plus_count, wl_count, wl_limit, bal, streak)
 
 
@@ -54,14 +42,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     user = await _get_user(tg_id)
     if user:
-        from handlers.activity import track_activity
         await track_activity(user["id"])
-
-    pp = zotuspp()
 
     # ── Navigation ──
     if data == "main":
-        user = await _get_user(tg_id)
         if not user:
             await q.edit_message_text("Аккаунт не привязан. /start", parse_mode="HTML")
             return
@@ -73,7 +57,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "status":
-        user = await _get_user(tg_id)
         if not user:
             await q.edit_message_text("Аккаунт не привязан. /start", parse_mode="HTML")
             return
@@ -86,7 +69,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # ── Devices ──
     if data == "devices":
-        user = await _get_user(tg_id)
         if not user:
             await q.answer("Аккаунт не привязан.", show_alert=True)
             return
@@ -94,7 +76,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "devices_del":
-        user = await _get_user(tg_id)
         if not user:
             await q.answer("Аккаунт не привязан.", show_alert=True)
             return
@@ -103,39 +84,32 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data.startswith("dev_del_"):
         dev_id = data[len("dev_del_"):]
-        user = await _get_user(tg_id)
         if not user:
             return
-        await execute(pp,
-            "UPDATE sub_devices SET is_deleted = 1 WHERE user_id = %s AND device_id = %s",
-            (user["id"], dev_id))
+        await db.delete_device(user["id"], dev_id)
         await q.answer("Удалено")
         await _show_devices(q, user, is_admin, False)
         return
 
     if data.startswith("dev_restore_"):
         dev_id = data[len("dev_restore_"):]
-        user = await _get_user(tg_id)
         if not user:
             return
         uid = user["id"]
         is_unl = bool(user.get("no_device_limit"))
-        cnt = await fetch_val(pp,
-            "SELECT COUNT(*) FROM sub_devices WHERE user_id = %s AND is_deleted = 0 AND sub_type != 'wl'",
-            (uid,)) or 0
-        if not is_unl and cnt >= 3:
+        cnt = await db.get_active_count(uid)
+        # Count non-WL devices
+        plus_cnt = await db.get_device_count(uid, "plus")
+        if not is_unl and plus_cnt >= 3:
             await q.answer("Нет свободных слотов (3/3)", show_alert=True)
             return
-        await execute(pp,
-            "UPDATE sub_devices SET is_deleted = 0 WHERE user_id = %s AND device_id = %s",
-            (uid, dev_id))
+        await db.restore_device(uid, dev_id)
         await q.answer("Восстановлено")
         await _show_devices(q, user, is_admin, True)
         return
 
     # ── Subscribe ──
     if data == "connect":
-        user = await _get_user(tg_id)
         if not user or not user.get("is_plus") or not user.get("sub_token"):
             await q.edit_message_text(
                 "⭐ Требуется Zotus++.\n\nКупить: https://store.zotus.ru/app/zotus-plus",
@@ -157,7 +131,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # ── Notifications ──
     if data == "notif":
-        user = await _get_user(tg_id)
         if not user or not user.get("is_plus"):
             await q.answer("Только для Zotus++", show_alert=True)
             return
@@ -171,7 +144,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # ── Buy ──
     if data == "buy":
-        user = await _get_user(tg_id)
         out = (
             "<b>⭐ Zotus++</b>\n\n"
             f"• {PLUS_PRICES['monthly']} ₽ / месяц\n"
@@ -185,20 +157,16 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if data.startswith("buy_tier_"):
         tier = data[len("buy_tier_"):]
-        user = await _get_user(tg_id)
         if not user:
             await q.answer("Аккаунт не привязан.", show_alert=True)
             return
-        suid = await _get_store_user_id(user["username"])
-        if not suid:
+        store_u = await db.get_store_user(user["username"])
+        if not store_u:
             await q.answer("Store-аккаунт не найден. /start", show_alert=True)
             return
 
         amount = PLUS_PRICES.get(tier, 100)
-        result = await create_payment(
-            float(amount), user["username"], tier, suid,
-            wl_extra=False,
-        )
+        result = await create_payment(float(amount), user["username"], tier, store_u["id"])
         if not result:
             await q.answer("Ошибка создания платежа. Попробуйте позже.", show_alert=True)
             return
@@ -223,7 +191,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         status = result["status"]
         if status == "completed":
-            user = await _get_user(tg_id)
             await q.edit_message_text(
                 "✅ <b>Оплата прошла!</b>\n\nПодписка активирована.\n/start для обновления статуса.",
                 parse_mode="HTML",
@@ -241,11 +208,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # ── WL Buy ──
     if data == "wl_buy":
-        user = await _get_user(tg_id)
         if not user or not user.get("is_plus"):
             await q.answer("Только для Zotus++", show_alert=True)
             return
-        wl_limit = int(user.get("wl_device_limit", 2) or 2)
+        wl_limit = await db.get_wl_limit(user["username"])
         if wl_limit >= MAX_WL_DEVICES:
             await q.answer(f"Достигнут лимит ({MAX_WL_DEVICES} устройств)", show_alert=True)
             return
@@ -264,25 +230,21 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == "wl_buy_confirm":
-        user = await _get_user(tg_id)
         if not user:
             await q.answer("Аккаунт не привязан.", show_alert=True)
             return
-        wl_limit = int(user.get("wl_device_limit", 2) or 2)
+        wl_limit = await db.get_wl_limit(user["username"])
         if wl_limit >= MAX_WL_DEVICES:
             await q.answer("Лимит достигнут", show_alert=True)
             return
         extra_count = max(0, wl_limit - 2)
         price = WL_EXTRA_FIRST if extra_count == 0 else WL_EXTRA_NEXT
-        suid = await _get_store_user_id(user["username"])
-        if not suid:
+        store_u = await db.get_store_user(user["username"])
+        if not store_u:
             await q.answer("Store-аккаунт не найден.", show_alert=True)
             return
 
-        result = await create_payment(
-            float(price), user["username"], "wl_extra", suid,
-            wl_extra=True,
-        )
+        result = await create_payment(float(price), user["username"], "wl_extra", store_u["id"], wl_extra=True)
         if not result:
             await q.answer("Ошибка создания платежа", show_alert=True)
             return
@@ -296,9 +258,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    # ── Settings navigation ──
+    # ── Settings ──
     if data == "settings":
-        user = await _get_user(tg_id)
         if not user:
             await q.answer("Аккаунт не привязан.", show_alert=True)
             return
@@ -312,25 +273,19 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    # ── Fallback ──
     await q.answer(f"Неизвестное действие: {data}")
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
 
 async def _show_devices(q, user: dict, is_admin: bool, deleted: bool) -> None:
-    pp = zotuspp()
     uid = user["id"]
     is_unl = bool(user.get("no_device_limit"))
-    flt = 1 if deleted else 0
-    devs = await fetch_all(pp,
-        "SELECT * FROM sub_devices WHERE user_id = %s AND is_deleted = %s ORDER BY last_seen DESC",
-        (uid, flt))
-    act_cnt = await fetch_val(pp,
-        "SELECT COUNT(*) FROM sub_devices WHERE user_id = %s AND is_deleted = 0", (uid,)) or 0
+    devs = await db.get_devices(uid, deleted=deleted)
+    act_cnt = await db.get_active_count(uid)
 
     if deleted:
-        out = f"<b>📂 Удалённые устройства</b>"
+        out = "<b>📂 Удалённые устройства</b>"
     else:
         out = f"<b>📱 Устройства ({len(devs)}" + ("♾" if is_unl else "/3") + ")</b>"
 
@@ -343,15 +298,11 @@ async def _show_devices(q, user: dict, is_admin: bool, deleted: bool) -> None:
 
         prefix = "dev_restore" if deleted else "dev_del"
         dkb = devices_kb(devs, prefix=prefix, restore=deleted)
-
         rows = list(dkb.inline_keyboard)
         if not deleted:
-            dels = await fetch_val(pp,
-                "SELECT COUNT(*) FROM sub_devices WHERE user_id = %s AND is_deleted = 1",
-                (uid,)) or 0
+            dels = len(await db.get_devices(uid, deleted=True))
             if dels > 0:
-                rows.append([InlineKeyboardButton(
-                    f"📂 Удалённые ({dels})", callback_data="devices_del")])
+                rows.append([InlineKeyboardButton(f"📂 Удалённые ({dels})", callback_data="devices_del")])
         rows.append([InlineKeyboardButton(
             "🔙 Назад", callback_data="devices" if deleted else "main")])
         kb = InlineKeyboardMarkup(rows)

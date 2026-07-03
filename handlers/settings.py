@@ -1,31 +1,28 @@
 """Settings handlers: password change (ConversationHandler)."""
 import bcrypt
 from telegram import Update
-from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, MessageHandler, filters, CallbackQueryHandler
-import hashlib
-import base64
-import os
+from telegram.ext import (
+    ContextTypes, ConversationHandler,
+    CommandHandler, MessageHandler, CallbackQueryHandler, filters,
+)
 
-from db import zotuspp, fetch_one, execute
+import db
 from keyboards import cancel_kb
 
 AWAIT_PASSWORD = 1
 
 
 async def chpass_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Callback: user clicked 'Change/Set password'."""
     q = update.callback_query
     await q.answer()
 
     tg_id = q.from_user.id
-    user = await fetch_one(zotuspp(), "SELECT * FROM users WHERE telegram_id = %s", (tg_id,))
+    user = await db.find_user(tg_id)
     if not user:
         await q.edit_message_text("Аккаунт не привязан.", parse_mode="HTML")
         return ConversationHandler.END
 
     has_pw = bool(user.get("password") and user["password"] is not None)
-    action = "смены" if has_pw else "установки"
-
     context.user_data["chpass_uid"] = user["id"]
 
     await q.edit_message_text(
@@ -39,7 +36,6 @@ async def chpass_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Receive new password text."""
     pw = update.message.text.strip()
     if len(pw) < 4:
         await update.message.reply_text(
@@ -53,9 +49,8 @@ async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("Ошибка сессии. /start")
         return ConversationHandler.END
 
-    import hashlib
-    phash = _make_hash(pw)
-    await execute(zotuspp(), "UPDATE users SET password = %s WHERE id = %s", (phash, uid))
+    phash = bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+    await db.update_password(uid, phash)
     await update.message.reply_text(
         f"✅ Пароль изменён!\n\nДлина: {len(pw)} симв.",
         reply_markup=None,
@@ -75,10 +70,6 @@ async def cancel_chpass_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data.pop("chpass_uid", None)
     await q.edit_message_text("❌ Смена пароля отменена.", parse_mode="HTML")
     return ConversationHandler.END
-
-
-def _make_hash(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 
 def password_conv_handler() -> ConversationHandler:

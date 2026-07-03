@@ -1,18 +1,18 @@
 """Text command handlers: /status, /devices, /buy, /link, /cancel."""
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from db import zotuspp, store, fetch_one, execute, fetch_all, fetch_val
+import db
 from keyboards import main_kb, back_kb, devices_kb
 from utils import profile_text, device_text, esc
 from config import ADMIN_IDS, STORE_URL
-from handlers.callbacks import _profile_text, _show_devices
+from handlers.callbacks import _profile_text
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tg_id = update.effective_user.id
     is_admin = tg_id in ADMIN_IDS
-    user = await fetch_one(zotuspp(), "SELECT * FROM users WHERE telegram_id = %s", (tg_id,))
+    user = await db.find_user(tg_id)
     if not user:
         await update.message.reply_text("Аккаунт не привязан. /start")
         return
@@ -25,17 +25,14 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def devices_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tg_id = update.effective_user.id
-    user = await fetch_one(zotuspp(), "SELECT * FROM users WHERE telegram_id = %s", (tg_id,))
+    user = await db.find_user(tg_id)
     if not user:
         await update.message.reply_text("Аккаунт не привязан. /start")
         return
 
-    pp = zotuspp()
     uid = user["id"]
     is_unl = bool(user.get("no_device_limit"))
-    devs = await fetch_all(pp,
-        "SELECT * FROM sub_devices WHERE user_id = %s AND is_deleted = 0 ORDER BY last_seen DESC",
-        (uid,))
+    devs = await db.get_devices(uid, deleted=False)
     out = f"<b>📱 Устройства ({len(devs)}" + ("♾" if is_unl else "/3") + ")</b>"
     if not devs:
         out += "\n\nНет активных устройств."
@@ -45,9 +42,8 @@ async def devices_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             out += f"\n\n{device_text(d, i, show_type=True)}"
         dkb = devices_kb(devs, "dev_del", restore=False)
         rows = list(dkb.inline_keyboard) + [[
-            __import__("telegram").InlineKeyboardButton("📊 Статус", callback_data="status")
+            InlineKeyboardButton("📊 Статус", callback_data="status")
         ]]
-        from telegram import InlineKeyboardMarkup
         kb = InlineKeyboardMarkup(rows)
 
     await update.message.reply_text(out, parse_mode="HTML", reply_markup=kb)
@@ -55,7 +51,7 @@ async def devices_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tg_id = update.effective_user.id
-    user = await fetch_one(zotuspp(), "SELECT * FROM users WHERE telegram_id = %s", (tg_id,))
+    user = await db.find_user(tg_id)
     store_url = f"{STORE_URL}/app/zotus-plus"
     out = (
         "<b>⭐ Zotus++</b>\n\n"
@@ -65,7 +61,6 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     if user:
         out += f"\n\nВаш логин: <b>{esc(user['username'])}</b>"
-    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("🛒 Перейти к покупке", url=store_url)
     ]])
@@ -75,10 +70,7 @@ async def buy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args
     if not args:
-        await update.message.reply_text(
-            "Использование: /link <b>ваш_логин</b>",
-            parse_mode="HTML",
-        )
+        await update.message.reply_text("Использование: /link <b>ваш_логин</b>", parse_mode="HTML")
         return
 
     login = args[0].lstrip("@")
@@ -92,9 +84,7 @@ async def link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    pp = zotuspp()
-    # Check if user exists
-    user = await fetch_one(pp, "SELECT * FROM users WHERE username = %s", (login,))
+    user = await db.find_user_by_username(login)
     if not user:
         await update.message.reply_text(
             f"❌ Логин <b>{esc(login)}</b> не найден. Проверьте правильность.",
@@ -109,9 +99,7 @@ async def link_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    await execute(pp,
-        "UPDATE users SET telegram = %s, telegram_id = %s, chat_id = %s WHERE username = %s",
-        (tg_username, tg_id, update.effective_chat.id, login))
+    await db.update_telegram(user["id"], tg_id, tg_username, update.effective_chat.id)
     await update.message.reply_text(
         f"✅ Аккаунт <b>{esc(login)}</b> привязан!\n\n/start",
         parse_mode="HTML",

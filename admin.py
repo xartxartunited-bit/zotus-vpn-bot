@@ -1,25 +1,21 @@
 """Admin callbacks: stats, users, toggle plus/limit, ban, payments, broadcast."""
 import asyncio
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from db import zotuspp, store, fetch_one, execute, fetch_all, fetch_val
+import db
 from keyboards import admin_kb, back_kb, admin_user_kb
 from utils import admin_user_text, esc
 from config import ADMIN_IDS
 
 
 async def admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Handle admin callbacks. Returns True if handled, False otherwise."""
     q = update.callback_query
     data = q.data
     tg_id = q.from_user.id
 
     if tg_id not in ADMIN_IDS:
         return False
-
-    pp = zotuspp()
-    st = store()
 
     # ── Admin panel ──
     if data == "admin":
@@ -28,43 +24,23 @@ async def admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
 
     # ── Stats ──
     if data == "astats":
-        total = await fetch_val(pp, "SELECT COUNT(*) FROM users") or 0
-        plus = await fetch_val(pp, "SELECT COUNT(*) FROM users WHERE is_plus = 1") or 0
-        online = await fetch_val(pp,
-            "SELECT COUNT(*) FROM users WHERE last_seen > DATE_SUB(NOW(), INTERVAL 1 HOUR)") or 0
-        today = await fetch_val(pp,
-            "SELECT COUNT(*) FROM users WHERE last_seen > DATE_SUB(NOW(), INTERVAL 24 HOUR)") or 0
-        devs = await fetch_val(pp,
-            "SELECT COUNT(*) FROM sub_devices WHERE is_deleted = 0") or 0
-        wl_users = await fetch_val(pp,
-            "SELECT COUNT(*) FROM users WHERE wl_device_limit > 2") or 0
-
+        stats = await db.get_stats()
         out = (
             f"<b>📊 Статистика</b>\n\n"
-            f"👥 Всего: <b>{total}</b>\n"
-            f"⭐ Plus: <b>{plus}</b>\n"
-            f"🗂 WL активных: <b>{wl_users}</b>\n"
-            f"📱 Устройств: <b>{devs}</b>\n"
-            f"🟢 Онлайн (час): <b>{online}</b>\n"
-            f"📅 За 24ч: <b>{today}</b>"
+            f"👥 Всего: <b>{stats.get('total', 0)}</b>\n"
+            f"⭐ Plus: <b>{stats.get('plus', 0)}</b>\n"
+            f"🗂 WL активных: <b>{stats.get('wl_users', 0)}</b>\n"
+            f"📱 Устройств: <b>{stats.get('devs', 0)}</b>\n"
+            f"🟢 Онлайн (час): <b>{stats.get('online', 0)}</b>\n"
+            f"📅 За 24ч: <b>{stats.get('today', 0)}</b>"
         )
-        try:
-            ev = await fetch_val(pp,
-                "SELECT COUNT(*) FROM user_events WHERE created_at > DATE_SUB(NOW(), INTERVAL 24 HOUR)")
-            if ev:
-                out += f"\n📈 Событий: <b>{ev}</b>"
-        except Exception:
-            pass
         await q.edit_message_text(out, parse_mode="HTML", reply_markup=admin_kb())
         return True
 
     # ── User list ──
     if data == "ausers":
-        users = await fetch_all(pp,
-            "SELECT id, username, is_plus, no_device_limit, last_seen "
-            "FROM users ORDER BY last_seen DESC LIMIT 10")
+        users = await db.get_users_list(10)
         out = "<b>👥 Пользователи</b>"
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         kb_rows = []
         for u in users:
             icon = "⭐" if u.get("is_plus") else "🆓"
@@ -86,13 +62,11 @@ async def admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
     # ── User detail ──
     if data.startswith("auser_"):
         uid = int(data[len("auser_"):])
-        u = await fetch_one(pp, "SELECT * FROM users WHERE id = %s", (uid,))
+        u = await db.get_user_by_id(uid)
         if not u:
             await q.answer("Пользователь не найден", show_alert=True)
             return True
-        devs = await fetch_all(pp,
-            "SELECT * FROM sub_devices WHERE user_id = %s AND is_deleted = 0 ORDER BY last_seen DESC",
-            (uid,))
+        devs = await db.get_devices(uid, deleted=False)
         await q.edit_message_text(
             admin_user_text(u, devs),
             parse_mode="HTML",
@@ -103,32 +77,13 @@ async def admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
     # ── Toggle Plus ──
     if data.startswith("atoggle_plus_"):
         uid = int(data[len("atoggle_plus_"):])
-        u = await fetch_one(pp, "SELECT * FROM users WHERE id = %s", (uid,))
-        if not u:
+        new_val = await db.toggle_plus(uid)
+        if new_val is None:
             await q.answer("Не найден", show_alert=True)
             return True
-
-        new_val = 0 if u.get("is_plus") else 1
-        await execute(pp, "UPDATE users SET is_plus = %s WHERE id = %s", (new_val, uid))
-        if new_val and not u.get("sub_token"):
-            import secrets
-            sub_token = secrets.token_hex(24)
-            plus_id = f"admin{secrets.token_hex(4)}"
-            await execute(pp,
-                "UPDATE users SET sub_token = %s, plus_id = %s, subscription_expires = '0000-00-00 00:00:00' WHERE id = %s",
-                (sub_token, plus_id, uid))
-        if new_val and (not u.get("subscription_expires") or str(u.get("subscription_expires")) in ("0000-00-00 00:00:00", "None", "")):
-            await execute(pp,
-                "UPDATE users SET subscription_expires = DATE_ADD(NOW(), INTERVAL 30 DAY) WHERE id = %s",
-                (uid,))
-
         await q.answer("Plus выдан на 30 дней" if new_val else "Plus снят", show_alert=True)
-
-        # Refresh
-        u = await fetch_one(pp, "SELECT * FROM users WHERE id = %s", (uid,))
-        devs = await fetch_all(pp,
-            "SELECT * FROM sub_devices WHERE user_id = %s AND is_deleted = 0 ORDER BY last_seen DESC",
-            (uid,))
+        u = await db.get_user_by_id(uid)
+        devs = await db.get_devices(uid, deleted=False)
         await q.edit_message_text(
             admin_user_text(u, devs),
             parse_mode="HTML",
@@ -139,19 +94,13 @@ async def admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
     # ── Toggle device limit ──
     if data.startswith("atoggle_limit_"):
         uid = int(data[len("atoggle_limit_"):])
-        u = await fetch_one(pp, "SELECT * FROM users WHERE id = %s", (uid,))
-        if not u:
+        new_val = await db.toggle_limit(uid)
+        if new_val is None:
             await q.answer("Не найден", show_alert=True)
             return True
-
-        new_val = 0 if u.get("no_device_limit") else 1
-        await execute(pp, "UPDATE users SET no_device_limit = %s WHERE id = %s", (new_val, uid))
         await q.answer("Лимит снят" if new_val else "Лимит включён", show_alert=True)
-
-        u = await fetch_one(pp, "SELECT * FROM users WHERE id = %s", (uid,))
-        devs = await fetch_all(pp,
-            "SELECT * FROM sub_devices WHERE user_id = %s AND is_deleted = 0 ORDER BY last_seen DESC",
-            (uid,))
+        u = await db.get_user_by_id(uid)
+        devs = await db.get_devices(uid, deleted=False)
         await q.edit_message_text(
             admin_user_text(u, devs),
             parse_mode="HTML",
@@ -159,22 +108,16 @@ async def admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
         )
         return True
 
-    # ── Ban (is_plus = 0) ──
+    # ── Ban (toggle plus) ──
     if data.startswith("aban_"):
         uid = int(data[len("aban_"):])
-        u = await fetch_one(pp, "SELECT * FROM users WHERE id = %s", (uid,))
-        if not u:
+        new_val = await db.toggle_plus(uid)
+        if new_val is None:
             await q.answer("Не найден", show_alert=True)
             return True
-
-        new_val = 0 if u.get("is_plus") else 1
-        await execute(pp, "UPDATE users SET is_plus = %s WHERE id = %s", (new_val, uid))
-        await q.answer("Забанен (Plus снят)" if new_val == 0 else "Разбанен (Plus выдан)", show_alert=True)
-
-        u = await fetch_one(pp, "SELECT * FROM users WHERE id = %s", (uid,))
-        devs = await fetch_all(pp,
-            "SELECT * FROM sub_devices WHERE user_id = %s AND is_deleted = 0 ORDER BY last_seen DESC",
-            (uid,))
+        await q.answer("Забанен" if new_val == 0 else "Разбанен", show_alert=True)
+        u = await db.get_user_by_id(uid)
+        devs = await db.get_devices(uid, deleted=False)
         await q.edit_message_text(
             admin_user_text(u, devs),
             parse_mode="HTML",
@@ -185,23 +128,19 @@ async def admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
     # ── Payments ──
     if data.startswith("apayments_"):
         uid = int(data[len("apayments_"):])
-        u = await fetch_one(pp, "SELECT * FROM users WHERE id = %s", (uid,))
+        u = await db.get_user_by_id(uid)
         if not u:
             await q.answer("Не найден", show_alert=True)
             return True
 
-        payments = await fetch_all(st,
-            "SELECT p.*, a.title as app_title FROM purchases p "
-            "JOIN apps a ON p.app_id = a.id "
-            "WHERE p.zotus_username = %s ORDER BY p.created_at DESC LIMIT 10",
-            (u["username"],))
+        payments = await db.get_store_payments(u["username"])
         out = f"<b>💰 Платежи @{esc(u['username'])}</b>"
         if not payments:
             out += "\n\nНет платежей."
         else:
             for p in payments:
-                status_icon = {"completed": "✅", "pending": "⏳", "failed": "❌"}.get(p.get("status"), "❓")
-                out += f"\n\n{status_icon} {p.get('amount', 0):.0f} ₽ — {esc(p.get('app_title', ''))}"
+                icon = {"completed": "✅", "pending": "⏳", "failed": "❌"}.get(p.get("status"), "❓")
+                out += f"\n\n{icon} {p.get('amount', 0):.0f} ₽ — {esc(p.get('app_title', ''))}"
                 dt = str(p.get("created_at", ""))[:10]
                 if dt:
                     out += f"\n   <small>{dt}</small>"
@@ -213,19 +152,17 @@ async def admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bo
         context.user_data["awaiting_broadcast"] = True
         await q.message.reply_text(
             "📢 <b>Рассылка</b>\n\n"
-            "Отправьте сообщение, которое будет разослано всем пользователям Plus с привязанным Telegram.\n\n"
+            "Отправьте сообщение для рассылки всем Plus-юзерам.\n\n"
             "/cancel для отмены.",
             parse_mode="HTML",
         )
         await q.answer()
         return True
 
-    # ── Not handled by admin ──
     return False
 
 
 async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle broadcast message text."""
     if not context.user_data.pop("awaiting_broadcast", False):
         return
 
@@ -237,9 +174,7 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
     if not msg_text:
         return
 
-    pp = zotuspp()
-    targets = await fetch_all(pp,
-        "SELECT chat_id, id FROM users WHERE is_plus = 1 AND chat_id IS NOT NULL AND chat_id > 0")
+    targets = await db.get_broadcast_targets()
     if not targets:
         await update.message.reply_text("Нет пользователей с chat_id.")
         return
@@ -255,7 +190,7 @@ async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT
             sent += 1
         except Exception:
             failed += 1
-        await asyncio.sleep(0.05)  # ~20 msg/sec
+        await asyncio.sleep(0.05)
 
     await update.message.reply_text(
         f"📢 Рассылка завершена.\n\n✅ Отправлено: {sent}\n❌ Ошибок: {failed}"
