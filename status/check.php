@@ -60,7 +60,7 @@ foreach ($lines as $line) {
     if (!$line || $line[0] === '#') continue;
 
     // Парсим VLESS URL: vless://uuid@host:port?params#name
-    if (!preg_match('#^vless://[^@]+@([^:]+):(\d+)\?(.+?)(?:#(.+))?$#', $line, $m)) continue;
+    if (!preg_match('~^vless://[^@]+@([^:]+):(\d+)\?(.+?)(?:#(.+))?$~', $line, $m)) continue;
 
     $host   = $m[1];
     $port   = (int)$m[2];
