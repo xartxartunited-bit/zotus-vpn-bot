@@ -3,7 +3,7 @@
  * Zotus VPN Status Checker
  * Проверяет серверы из sub.txt через openssl s_client (TLS-хендшейк)
  * При падении шлёт пост в @zotusvpn_status, через час удаляет.
- * Запуск в кроне: */5 * * * * php /path/to/bot/status/check.php
+ * Запуск в кроне: * /5 * * * * php /path/to/bot/status/check.php
  */
 
 $BOT_TOKEN = '8824530584:AAGMq0CDiSMoHgBuPun94vB5Iqbj8NoP9D0';
