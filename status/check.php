@@ -80,12 +80,19 @@ foreach ($lines as $line) {
         $sni = rawurldecode($sm[1]);
     }
 
+    // Извлекаем security (reality/tls/none)
+    $security = '';
+    if (preg_match('/security=([^&]+)/', $params, $sm)) {
+        $security = rawurldecode($sm[1]);
+    }
+
     $servers[] = [
         'id'   => md5($host . ':' . $port),
         'host' => $host,
         'port' => $port,
         'name' => $name,
         'sni'  => $sni,
+        'security' => $security,
     ];
 }
 
@@ -156,33 +163,42 @@ echo "Done. " . count($state) . " servers down.\n";
 
 function checkServer(array $srv): bool {
     global $TIMEOUT;
-    $host = escapeshellarg($srv['host']);
+    $host = $srv['host'];
     $port = (int)$srv['port'];
-    $sni  = escapeshellarg($srv['sni']);
+    $security = $srv['security'] ?? '';
 
-    // Первая попытка
-    $cmd = "timeout {$TIMEOUT} openssl s_client -connect {$host}:{$port} -servername {$sni} </dev/null 2>/dev/null";
-    exec($cmd, $output, $exitCode);
+    // TLS-проверка (reality / tls)
+    if ($security === 'reality' || $security === 'tls') {
+        $hostEsc = escapeshellarg($host);
+        $sniEsc  = escapeshellarg($srv['sni']);
+        $cmd = "timeout {$TIMEOUT} openssl s_client -connect {$hostEsc}:{$port} -servername {$sniEsc} </dev/null 2>/dev/null";
 
-    if ($exitCode === 0) {
-        // Ищем CONNECTED в выводе (успешный TLS)
-        $out = implode("\n", $output);
-        if (strpos($out, 'CONNECTED') !== false) {
+        exec($cmd, $output, $exitCode);
+        if ($exitCode === 0 && strpos(implode("\n", $output), 'CONNECTED') !== false) {
             return true;
         }
-    }
-
-    // Вторая попытка (мгновенная) — таймаут = был таймаут
-    if ($exitCode === 124) {
-        exec($cmd, $output, $exitCode);
-        if ($exitCode === 0) {
-            $out = implode("\n", $output);
-            if (strpos($out, 'CONNECTED') !== false) {
+        // Ретрай при таймауте
+        if ($exitCode === 124) {
+            exec($cmd, $output, $exitCode);
+            if ($exitCode === 0 && strpos(implode("\n", $output), 'CONNECTED') !== false) {
                 return true;
             }
         }
+        return false;
     }
 
+    // Простой TCP (ws без TLS, xhttp, grpc без TLS)
+    $errno = 0; $errstr = '';
+    $fp = @fsockopen($host, $port, $errno, $errstr, $TIMEOUT);
+    if ($fp) {
+        fclose($fp);
+        return true;
+    }
+    // Ретрай при таймауте (110 = connection timed out)
+    if ($errno === 110) {
+        $fp = @fsockopen($host, $port, $errno, $errstr, $TIMEOUT);
+        if ($fp) { fclose($fp); return true; }
+    }
     return false;
 }
 
