@@ -10,3 +10,5 @@ last_update.txt
 gif_file_id.txt
 poll.lock
 state/
+status/state.json
+status/cron.log
