@@ -77,50 +77,6 @@ function deletePost(int $messageId): void {
     ]);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-
-function logMessage(string $message): void {
-    $timestamp = date('Y-m-d H:i:s');
-    file_put_contents($GLOBALS['LOG_FILE'], "[{$timestamp}] {$message}\n", FILE_APPEND);
-}
-
-function tg(string $method, array $data = []): ?array {
-    global $BOT_TOKEN;
-    $url = "https://api.telegram.org/bot{$BOT_TOKEN}/{$method}";
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_POST => true,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-        CURLOPT_POSTFIELDS => json_encode($data),
-        CURLOPT_TIMEOUT => 10,
-    ]);
-    $r = curl_exec($ch);
-    curl_close($ch);
-    return json_decode($r, true);
-}
-
-function sendPost(string $text, array $entities = []): ?array {
-    return tg('sendMessage', [
-        'chat_id' => $GLOBALS['CHANNEL'],
-        'text' => $text,
-        'parse_mode' => 'HTML',
-        'entities' => $entities,
-        'disable_web_page_preview' => true,
-    ]);
-}
-
-function deletePost(int $messageId): void {
-    tg('deleteMessage', [
-        'chat_id' => $GLOBALS['CHANNEL'],
-        'message_id' => $messageId,
-    ]);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-
-// ═══════════════════════════════════════════════════════════════════════════
-
 // Парсим sub.txt
 if (!file_exists($SUB_FILE)) {
     $msg = "sub.txt not found: $SUB_FILE";
