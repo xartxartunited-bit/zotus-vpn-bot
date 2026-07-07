@@ -31,43 +31,64 @@ function tg(string $method, array $data = []): ?array {
     return json_decode($r, true);
 }
 
-function buildDownMessage(string $name): array {
-    // Plain text for offset calculation (UTF-16 code units)
-    $prefix1 = "❗️ Сервер «{$name}\" временно недоступен\n\n";
-    $prefix2 = $prefix1 . "✅ В ближайшее время его работа восстановится\n";
-    $prefix3 = $prefix2 . "⌛️ пост будет удален в течении часа\n\n";
+function utf16len(string $s): int {
+    $len = 0;
+    for ($i = 0; $i < strlen($s); $i++) {
+        $c = ord($s[$i]);
+        if ($c < 0x80) {
+            $len++;
+        } elseif ($c < 0xC0) {
+            // continuation byte, skip
+        } elseif ($c < 0xE0) {
+            $len++;
+            $i += 1;
+        } elseif ($c < 0xF0) {
+            $len++;
+            $i += 2;
+        } else {
+            $len += 2; // surrogate pair in UTF-16
+            $i += 3;
+        }
+    }
+    return $len;
+}
 
-    $text = "❗️ Сервер «{$name}\" временно недоступен\n\n";
+function buildDownMessage(string $name): array {
+    $text  = "❗️ Сервер «{$name}\" временно недоступен\n\n";
     $text .= "✅ В ближайшее время его работа восстановится\n";
     $text .= "⌛️ пост будет удален в течении часа\n\n";
     $text .= "🟢 Zotus VPN. Статус (http://t.me/zotusvpn_status)";
 
-    // Offsets in UTF-16 code units for custom emoji entities
-    // ❗️ at offset 0
-    // ✅ at start of line 2 (after prefix1)
-    // ⌛️ at start of line 3 (after prefix2)
-    // 🟢 at start of line 4 (after prefix1 + "✅ В ближайшее время его работа восстановится\n⌛️ пост будет удален в течении часа\n\n")
+    $line1 = "❗️ Сервер «{$name}\" временно недоступен\n\n";
+    $line2 = $line1 . "✅ В ближайшее время его работа восстановится\n";
+    $line3 = $line2 . "⌛️ пост будет удален в течении часа\n\n";
 
     $entities = [
-        ['type' => 'custom_emoji', 'offset' => 0, 'length' => 1, 'custom_emoji_id' => '5220197908342648622'],
-        ['type' => 'custom_emoji', 'offset' => mb_strlen($prefix1, 'UTF-16'), 'length' => 1, 'custom_emoji_id' => '5219899949281453881'],
-        ['type' => 'custom_emoji', 'offset' => mb_strlen($prefix2, 'UTF-16'), 'length' => 1, 'custom_emoji_id' => '5891211339170326418'],
-        ['type' => 'custom_emoji', 'offset' => mb_strlen("❗️ Сервер «{$name}\" временно недоступен\n\n✅ В ближайшее время его работа восстановится\n⌛️ пост будет удален в течении часа\n\n", 'UTF-16'), 'length' => 1, 'custom_emoji_id' => '5416081784641168838'],
+        ['type' => 'custom_emoji', 'offset' => 0,                                   'length' => 2, 'custom_emoji_id' => '5220197908342648622'],
+        ['type' => 'custom_emoji', 'offset' => utf16len($line1),                     'length' => 1, 'custom_emoji_id' => '5219899949281453881'],
+        ['type' => 'custom_emoji', 'offset' => utf16len($line2),                     'length' => 2, 'custom_emoji_id' => '5891211339170326418'],
+        ['type' => 'custom_emoji', 'offset' => utf16len($line3),                     'length' => 2, 'custom_emoji_id' => '5416081784641168838'],
     ];
-
-    $text = "❗️ Сервер «{$name}\" временно недоступен\n\n✅ В ближайшее время его работа восстановится\n⌛️ пост будет удален в течении часа\n\n🟢 Zotus VPN. Статус (http://t.me/zotusvpn_status)";
 
     return ['text' => $text, 'entities' => $entities];
 }
 
 function sendPost(string $text, array $entities = []): ?array {
-    return tg('sendMessage', [
+    $payload = [
         'chat_id' => $GLOBALS['CHANNEL'],
         'text' => $text,
-        'parse_mode' => 'HTML',
-        'entities' => $entities,
         'disable_web_page_preview' => true,
-    ]);
+    ];
+    if (!empty($entities)) {
+        $payload['entities'] = $entities;
+    } else {
+        $payload['parse_mode'] = 'HTML';
+    }
+    $result = tg('sendMessage', $payload);
+    if ($result && !($result['ok'] ?? false)) {
+        logMessage("sendMessage error: " . json_encode($result, JSON_UNESCAPED_UNICODE));
+    }
+    return $result;
 }
 
 function deletePost(int $messageId): void {
