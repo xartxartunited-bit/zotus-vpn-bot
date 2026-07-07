@@ -1,19 +1,19 @@
 <?php
-/**
- * Zotus VPN Status Checker
- * Проверяет серверы из sub.txt через openssl s_client (TLS-хендшейк)
- * При падении шлёт пост в @zotusvpn_status, через час удаляет.
- * Запуск в кроне: * /5 * * * * php /path/to/bot/status/check.php
- */
 
 $BOT_TOKEN = '8824530584:AAGMq0CDiSMoHgBuPun94vB5Iqbj8NoP9D0';
 $CHANNEL   = '@zotusvpn_status';
 $SUB_FILE  = __DIR__ . '/../../sub.txt';
 $STATE_FILE = __DIR__ . '/state.json';
+$LOG_FILE  = __DIR__ . '/log.txt';
 $TIMEOUT   = 15;
 $POST_TTL  = 3600; // 1 час
 
 // ═══════════════════════════════════════════════════════════════════════════
+
+function logMessage(string $message): void {
+    $timestamp = date('Y-m-d H:i:s');
+    file_put_contents($GLOBALS['LOG_FILE'], "[{$timestamp}] {$message}\n", FILE_APPEND);
+}
 
 function tg(string $method, array $data = []): ?array {
     global $BOT_TOKEN;
@@ -31,10 +31,36 @@ function tg(string $method, array $data = []): ?array {
     return json_decode($r, true);
 }
 
-function sendPost(string $text): ?array {
+function buildDownMessage(string $name): array {
+    // Plain text for offset calculation
+    $prefix1 = "❗️ Сервер «{$name}\" временно недоступен\n\n";
+    $prefix2 = $prefix1 . "✅ В ближайшее время его работа восстановится\n";
+    $prefix3 = $prefix2 . "⌛️ пост будет удален в течении часа\n\n";
+
+    $text = "❗️ Сервер «{$name}\" временно недоступен\n\n";
+    $text .= "✅ В ближайшее время его работа восстановится\n";
+    $text .= "⌛️ пост будет удален в течении часа\n\n";
+    $text .= "🟢 Zotus VPN. Статус (http://t.me/zotusvpn_status)";
+
+    // Offsets in UTF-16 code units for custom emoji entities
+    $entities = [
+        ['type' => 'custom_emoji', 'offset' => 0, 'length' => 1, 'custom_emoji_id' => '5220197908342648622'],
+        ['type' => 'custom_emoji', 'offset' => mb_strlen("❗️ Сервер «{$name}\" временно недоступен\n\n", 'UTF-16'), 'length' => 1, 'custom_emoji_id' => '5219899949281453881'],
+        ['type' => 'custom_emoji', 'offset' => mb_strlen("❗️ Сервер «{$name}\" временно недоступен\n\n✅ В ближайшее время его работа восстановится\n", 'UTF-16'), 'length' => 1, 'custom_emoji_id' => '5891211339170326418'],
+        ['type' => 'custom_emoji', 'offset' => mb_strlen("❗️ Сервер «{$name}\" временно недоступен\n\n✅ В ближайшее время его работа восстановится\n⌛️ пост будет удален в течении часа\n\n", 'UTF-16'), 'length' => 1, 'custom_emoji_id' => '5416081784641168838'],
+    ];
+
+    $text = "❗️ Сервер «{$name}\" временно недоступен\n\n✅ В ближайшее время его работа восстановится\n⌛️ пост будет удален в течении часа\n\n🟢 Zotus VPN. Статус (http://t.me/zotusvpn_status)";
+
+    return ['text' => $text, 'entities' => $entities];
+}
+
+function sendPost(string $text, array $entities = []): ?array {
     return tg('sendMessage', [
         'chat_id' => $GLOBALS['CHANNEL'],
         'text' => $text,
+        'parse_mode' => 'HTML',
+        'entities' => $entities,
         'disable_web_page_preview' => true,
     ]);
 }
@@ -48,9 +74,53 @@ function deletePost(int $messageId): void {
 
 // ═══════════════════════════════════════════════════════════════════════════
 
+function logMessage(string $message): void {
+    $timestamp = date('Y-m-d H:i:s');
+    file_put_contents($GLOBALS['LOG_FILE'], "[{$timestamp}] {$message}\n", FILE_APPEND);
+}
+
+function tg(string $method, array $data = []): ?array {
+    global $BOT_TOKEN;
+    $url = "https://api.telegram.org/bot{$BOT_TOKEN}/{$method}";
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_POSTFIELDS => json_encode($data),
+        CURLOPT_TIMEOUT => 10,
+    ]);
+    $r = curl_exec($ch);
+    curl_close($ch);
+    return json_decode($r, true);
+}
+
+function sendPost(string $text, array $entities = []): ?array {
+    return tg('sendMessage', [
+        'chat_id' => $GLOBALS['CHANNEL'],
+        'text' => $text,
+        'parse_mode' => 'HTML',
+        'entities' => $entities,
+        'disable_web_page_preview' => true,
+    ]);
+}
+
+function deletePost(int $messageId): void {
+    tg('deleteMessage', [
+        'chat_id' => $GLOBALS['CHANNEL'],
+        'message_id' => $messageId,
+    ]);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+
 // Парсим sub.txt
 if (!file_exists($SUB_FILE)) {
-    die("sub.txt not found: $SUB_FILE\n");
+    $msg = "sub.txt not found: $SUB_FILE";
+    logMessage("ERROR: $msg");
+    die($msg . "\n");
 }
 $lines = file($SUB_FILE, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
 $servers = [];
@@ -69,18 +139,17 @@ foreach ($lines as $line) {
 
     // Декодируем имя
     $name = rawurldecode($rawName);
-    // Убираем ?PLUS и +PLUS из имени
     $name = str_replace(['?PLUS', '+PLUS'], '', $name);
     $name = trim($name);
     if (!$name) $name = "$host:$port";
 
-    // Извлекаем SNI (если есть)
+    // Извлекаем SNI
     $sni = $host;
     if (preg_match('/sni=([^&]+)/', $params, $sm)) {
         $sni = rawurldecode($sm[1]);
     }
 
-    // Извлекаем security (reality/tls/none)
+    // Извлекаем security
     $security = '';
     if (preg_match('/security=([^&]+)/', $params, $sm)) {
         $security = rawurldecode($sm[1]);
@@ -112,9 +181,7 @@ foreach ($servers as $srv) {
     $currentEntry = $state[$id] ?? null;
 
     if ($isUp) {
-        // Сервер жив
         if ($currentEntry) {
-            // Был down → удаляем пост и убираем из стейта
             if (($currentEntry['msg_id'] ?? 0) > 0) {
                 deletePost($currentEntry['msg_id']);
             }
@@ -123,27 +190,22 @@ foreach ($servers as $srv) {
             echo "RECOVERED: {$srv['name']} ({$srv['host']}:{$srv['port']})\n";
         }
     } else {
-        // Сервер упал
         if ($currentEntry) {
-            // Уже в дауне — проверяем не пора ли перепостить (старше часа)
             $age = $now - ($currentEntry['down_since'] ?? $now);
             if ($age >= $POST_TTL) {
-                // Удаляем старый пост
                 if (($currentEntry['msg_id'] ?? 0) > 0) {
                     deletePost($currentEntry['msg_id']);
                 }
-                // Постим новый
-                $msg = buildDownMessage($srv);
-                $result = sendPost($msg);
-                $msgId = $result['result']['message_id'] ?? 0;
+                $msgData = buildDownMessage($srv['name']);
+                $result = sendPost($msgData['text'], $msgData['entities']);
+                $msgId = $result['result']['message_id'] ?? $msgId;
                 $state[$id] = ['down_since' => $now, 'msg_id' => $msgId];
                 $anyChange = true;
                 echo "REPOSTED (1h): {$srv['name']} — msg #{$msgId}\n";
             }
         } else {
-            // Новый даун → пост
-            $msg = buildDownMessage($srv);
-            $result = sendPost($msg);
+            $msgData = buildDownMessage($srv['name']);
+            $result = sendPost($msgData['text'], $msgData['entities']);
             $msgId = $result['result']['message_id'] ?? 0;
             $state[$id] = ['down_since' => $now, 'msg_id' => $msgId];
             $anyChange = true;
@@ -152,7 +214,6 @@ foreach ($servers as $srv) {
     }
 }
 
-// Сохраняем состояние если были изменения
 if ($anyChange) {
     file_put_contents($STATE_FILE, json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 }
@@ -167,17 +228,15 @@ function checkServer(array $srv): bool {
     $port = (int)$srv['port'];
     $security = $srv['security'] ?? '';
 
-    // TLS-проверка (reality / tls)
     if ($security === 'reality' || $security === 'tls') {
         $hostEsc = escapeshellarg($host);
         $sniEsc  = escapeshellarg($srv['sni']);
-        $cmd = "timeout {$TIMEOUT} openssl s_client -connect {$hostEsc}:{$port} -servername {$sniEsc} </dev/null 2>/dev/null";
+        $cmd = "timeout {$TIMEOUT} openssl s_client -connect {$host}:{$port} -servername {$sniEsc} </dev/null 2>/dev/null";
 
         exec($cmd, $output, $exitCode);
         if ($exitCode === 0 && strpos(implode("\n", $output), 'CONNECTED') !== false) {
             return true;
         }
-        // Ретрай при таймауте
         if ($exitCode === 124) {
             exec($cmd, $output, $exitCode);
             if ($exitCode === 0 && strpos(implode("\n", $output), 'CONNECTED') !== false) {
@@ -187,22 +246,15 @@ function checkServer(array $srv): bool {
         return false;
     }
 
-    // Простой TCP (ws без TLS, xhttp, grpc без TLS)
     $errno = 0; $errstr = '';
     $fp = @fsockopen($host, $port, $errno, $errstr, $TIMEOUT);
     if ($fp) {
         fclose($fp);
         return true;
     }
-    // Ретрай при таймауте (110 = connection timed out)
     if ($errno === 110) {
         $fp = @fsockopen($host, $port, $errno, $errstr, $TIMEOUT);
         if ($fp) { fclose($fp); return true; }
     }
     return false;
-}
-
-function buildDownMessage(array $srv): string {
-    $name = $srv['name'];
-    return "❗ Сервер «{$name}» временно недоступен\n\n✅ В ближайшее время его работа восстановится\n⌛️ пост будет удален в течении часа\n\n🟢 Zotus VPN. Статус (http://t.me/zotusvpn_status)";
 }
