@@ -32,7 +32,7 @@ function tg(string $method, array $data = []): ?array {
 }
 
 function buildDownMessage(string $name): array {
-    // Plain text for offset calculation
+    // Plain text for offset calculation (UTF-16 code units)
     $prefix1 = "❗️ Сервер «{$name}\" временно недоступен\n\n";
     $prefix2 = $prefix1 . "✅ В ближайшее время его работа восстановится\n";
     $prefix3 = $prefix2 . "⌛️ пост будет удален в течении часа\n\n";
@@ -43,10 +43,15 @@ function buildDownMessage(string $name): array {
     $text .= "🟢 Zotus VPN. Статус (http://t.me/zotusvpn_status)";
 
     // Offsets in UTF-16 code units for custom emoji entities
+    // ❗️ at offset 0
+    // ✅ at start of line 2 (after prefix1)
+    // ⌛️ at start of line 3 (after prefix2)
+    // 🟢 at start of line 4 (after prefix1 + "✅ В ближайшее время его работа восстановится\n⌛️ пост будет удален в течении часа\n\n")
+
     $entities = [
         ['type' => 'custom_emoji', 'offset' => 0, 'length' => 1, 'custom_emoji_id' => '5220197908342648622'],
-        ['type' => 'custom_emoji', 'offset' => mb_strlen("❗️ Сервер «{$name}\" временно недоступен\n\n", 'UTF-16'), 'length' => 1, 'custom_emoji_id' => '5219899949281453881'],
-        ['type' => 'custom_emoji', 'offset' => mb_strlen("❗️ Сервер «{$name}\" временно недоступен\n\n✅ В ближайшее время его работа восстановится\n", 'UTF-16'), 'length' => 1, 'custom_emoji_id' => '5891211339170326418'],
+        ['type' => 'custom_emoji', 'offset' => mb_strlen($prefix1, 'UTF-16'), 'length' => 1, 'custom_emoji_id' => '5219899949281453881'],
+        ['type' => 'custom_emoji', 'offset' => mb_strlen($prefix2, 'UTF-16'), 'length' => 1, 'custom_emoji_id' => '5891211339170326418'],
         ['type' => 'custom_emoji', 'offset' => mb_strlen("❗️ Сервер «{$name}\" временно недоступен\n\n✅ В ближайшее время его работа восстановится\n⌛️ пост будет удален в течении часа\n\n", 'UTF-16'), 'length' => 1, 'custom_emoji_id' => '5416081784641168838'],
     ];
 
@@ -198,7 +203,7 @@ foreach ($servers as $srv) {
                 }
                 $msgData = buildDownMessage($srv['name']);
                 $result = sendPost($msgData['text'], $msgData['entities']);
-                $msgId = $result['result']['message_id'] ?? $msgId;
+                $msgId = $result['result']['message_id'] ?? 0;
                 $state[$id] = ['down_since' => $now, 'msg_id' => $msgId];
                 $anyChange = true;
                 echo "REPOSTED (1h): {$srv['name']} — msg #{$msgId}\n";
@@ -228,6 +233,7 @@ function checkServer(array $srv): bool {
     $port = (int)$srv['port'];
     $security = $srv['security'] ?? '';
 
+    // TLS-проверка (reality / tls)
     if ($security === 'reality' || $security === 'tls') {
         $hostEsc = escapeshellarg($host);
         $sniEsc  = escapeshellarg($srv['sni']);
@@ -246,6 +252,7 @@ function checkServer(array $srv): bool {
         return false;
     }
 
+    // Простой TCP (ws без TLS, xhttp, grpc без TLS)
     $errno = 0; $errstr = '';
     $fp = @fsockopen($host, $port, $errno, $errstr, $TIMEOUT);
     if ($fp) {
